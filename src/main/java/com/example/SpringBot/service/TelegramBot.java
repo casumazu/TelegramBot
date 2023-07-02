@@ -9,12 +9,17 @@ import org.springframework.jdbc.support.rowset.SqlRowSet;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Slf4j
@@ -44,29 +49,37 @@ public class TelegramBot extends TelegramLongPollingBot {
 
     @Override
     public void onUpdateReceived(Update update) {
+        Message message = update.getMessage();
         if (update.hasMessage() && update.getMessage().hasText()) {
             String messageText = update.getMessage().getText();
             long chatID = update.getMessage().getChatId();
 
             switch (messageText) {
-                case "/start":
-                    startCommandReceived(chatID, update.getMessage().getChat().getFirstName());
-                    break;
-
-                case "/drinks":
-                    drinksCoffee(chatID);
-                    break;
-                case "/feedback":
+                case "/start" -> sendMsg(message, chatID, update.getMessage().getChat().getFirstName());
+                case "Напитки \u2615" -> sendMessages(chatID, drinksCoffee());
+                case "Добавить отзыв \uD83D\uDE0A" -> {
                     sendMessages(chatID, "Напишите отзыв.");
                     feedbackMap.put(chatID, "awaiting_feedback");
-                    break;
-                default:
-                    if ((feedbackMap.containsKey(chatID))) {
+                }
+                case "Посмотреть отзывы" -> {
+                    List<String> feedbacks = getFeedbacks();
+                    if (!feedbacks.isEmpty()) {
+                        StringBuilder response = new StringBuilder("Отзывы:\n");
+                        for (String feedback : feedbacks) {
+                            response.append("- ").append(feedback).append("\n");
+                        }
+                        sendMessages(chatID, response.toString());
+                    } else {
+                        sendMessages(chatID, "Нет доступных отзывов.");
+                    }
+                }
+                default -> {
+                    if ((feedbackMap.containsKey(chatID))) { // для feedback
                         handleUserInput(chatID, messageText);
                     } else {
                         sendMessages(chatID, "Команда не поддерживается");
                     }
-
+                }
             }
         }
     }
@@ -76,7 +89,7 @@ public class TelegramBot extends TelegramLongPollingBot {
 
         if (feedbackState != null && feedbackState.equals("awaiting_feedback")) {
             // Обрабатываем полученный отзыв
-            if(messageText.length() > 2) {
+            if (messageText.length() > 2) {
                 insertFeedback(chatID, messageText);
                 sendMessages(chatID, "Отзыв добавлен");
             } else {
@@ -107,21 +120,6 @@ public class TelegramBot extends TelegramLongPollingBot {
         }
     }
 
-    private void startCommandReceived(long chatID, String name) {
-        String answer = "Приветствую, " + name + " ! \n" +
-                "\n" +
-                "Доступные команды:" +
-                " \n    /start" +
-                " \n    /drinks - напитки" +
-                " \n    /feedback - добавить отзыв" +
-                " \n " +
-                " \n В разработке: " +
-                " \n *   Акции" +
-                " \n *   Отзывы";
-        sendMessages(chatID, answer);
-        createUserIfNotExists(chatID, name);
-    }
-
     private void createUserIfNotExists(long UserID, String name) {
         log.info("Получен запрос на получение пользователя({})", UserID);
         String sqlQuery = "select chatID, name FROM users WHERE chatID = ?";
@@ -140,23 +138,73 @@ public class TelegramBot extends TelegramLongPollingBot {
         );
     }
 
-    private void drinksCoffee(long chatId) {
-        String answer =
-                "Доступные напитки: \n" +
-                        "Большие\n" +
-                        "Капучино 350мл - 130 руб \n" +
-                        "Латте 350мл - 130 руб\n" +
-                        "Моккачино 350мл - 130 руб\n" +
-                        "\n" +
-                        "Маленькие\n" +
-                        "Раф Банановый 200 мл - 100 руб\n" +
-                        "Моккачино 200 мл - 100 руб\n" +
-                        "Латте 200 мл - 100 руб\n" +
-                        "Капучино 200 мл - 100 руб\n" +
-                        "Горячий шоколад 200 мл - 100 руб\n" +
-                        "Молочный шоколад 200 мл - 100 руб\n" +
-                        "Американо 200 мл - 100 руб\n";
-        sendMessages(chatId, answer);
+
+    public void sendMsg (Message message, long chatID, String name) {
+        SendMessage sendMessage = new SendMessage();
+        sendMessage.enableMarkdown(true);
+
+        ReplyKeyboardMarkup replyKeyboardMarkup = new
+                ReplyKeyboardMarkup();
+        sendMessage.setReplyMarkup(replyKeyboardMarkup);
+        replyKeyboardMarkup.setSelective(true);
+        replyKeyboardMarkup.setResizeKeyboard(true);
+        replyKeyboardMarkup.setOneTimeKeyboard(false);
+
+        // список строк клавиатуры
+        List<KeyboardRow> keyboard = new ArrayList<>();
+
+        // Первая строчка клавиатуры
+        KeyboardRow keyboardFirstRow = new KeyboardRow();
+        keyboardFirstRow.add("Напитки \u2615");
+        keyboardFirstRow.add("Добавить отзыв \uD83D\uDE0A");
+
+        // Вторая строчка клавиатуры
+        KeyboardRow keyboardSecondRow = new KeyboardRow();
+        keyboardSecondRow.add("Посмотреть отзывы");
+
+
+        keyboard.add(keyboardFirstRow);
+        keyboard.add(keyboardSecondRow);
+
+        replyKeyboardMarkup.setKeyboard(keyboard);
+
+        sendMessage.setChatId(message.getChatId().toString());
+        sendMessage.setReplyToMessageId(message.getMessageId());
+        sendMessage.setText("Приветствую, " + name + " !");
+        createUserIfNotExists(chatID, name);
+        try {
+            execute(sendMessage);
+        } catch (TelegramApiException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    private String drinksCoffee() {
+        return
+                """
+                        Доступные напитки:\s
+                        Большие
+                        Капучино 350мл - 130 руб\s
+                        Латте 350мл - 130 руб
+                        Моккачино 350мл - 130 руб
+
+                        Маленькие
+                        Раф Банановый 200 мл - 100 руб
+                        Моккачино 200 мл - 100 руб
+                        Латте 200 мл - 100 руб
+                        Капучино 200 мл - 100 руб
+                        Горячий шоколад 200 мл - 100 руб
+                        Молочный шоколад 200 мл - 100 руб
+                        Американо 200 мл - 100 руб
+                        """;
+    }
+
+    private List<String> getFeedbacks() {
+        String sqlQuery = "SELECT users.name, feedback.comment FROM feedback " +
+                "LEFT JOIN users ON users.id = feedback.user_id";
+        return jdbcTemplate.query(sqlQuery, (resultSet, rowNum) ->
+                resultSet.getString("name") + ": " + resultSet.getString("comment"));
     }
 
     private void sendMessages(long chatID, String sendText) {
