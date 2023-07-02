@@ -179,7 +179,6 @@ public class TelegramBot extends TelegramLongPollingBot {
         }
     }
 
-
     private String drinksCoffee() {
         return
                 """
