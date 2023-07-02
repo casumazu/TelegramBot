@@ -25,5 +25,4 @@ public class BotInitializer {
             throw new RuntimeException(e);
         }
     }
-
 }
