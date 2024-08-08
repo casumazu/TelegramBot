@@ -1,11 +1,14 @@
 package com.example.SpringBot.service;
 
 import com.example.SpringBot.config.BotConfig;
-import com.example.SpringBot.exception.UserNotFoundException;
+
+import com.example.SpringBot.model.Comments;
 import com.example.SpringBot.model.User;
+import com.example.SpringBot.repository.CommentsRepository;
+import com.example.SpringBot.repository.UserRepository;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.support.rowset.SqlRowSet;
+
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
@@ -15,26 +18,25 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMar
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 @Slf4j
-
 @Component
 public class TelegramBot extends TelegramLongPollingBot {
 
     final BotConfig config;
-    final JdbcTemplate jdbcTemplate;
+    @Autowired
+    private UserRepository userRepository;
+    @Autowired
+    private CommentsRepository commentsRepository;
 
     private final Map<Long, String> feedbackMap = new HashMap<>();
 
-    public TelegramBot(BotConfig config, JdbcTemplate jdbcTemplate) {
+    public TelegramBot(BotConfig config) {
         this.config = config;
-        this.jdbcTemplate = jdbcTemplate;
     }
 
     @Override
@@ -53,20 +55,21 @@ public class TelegramBot extends TelegramLongPollingBot {
         if (update.hasMessage() && update.getMessage().hasText()) {
             String messageText = update.getMessage().getText();
             long chatID = update.getMessage().getChatId();
+            User user = new User(chatID, update.getMessage().getChat().getFirstName());
 
             switch (messageText) {
-                case "/start" -> sendMsg(message, chatID, update.getMessage().getChat().getFirstName());
+                case "/start" -> sendMsg(message, chatID, user.getName());
                 case "Напитки \u2615" -> sendMessages(chatID, drinksCoffee());
                 case "Добавить отзыв \uD83D\uDE0A" -> {
                     sendMessages(chatID, "Напишите отзыв.");
                     feedbackMap.put(chatID, "awaiting_feedback");
                 }
                 case "Посмотреть отзывы" -> {
-                    List<String> feedbacks = getFeedbacks();
+                    List<Comments> feedbacks = commentsRepository.findAll();
                     if (!feedbacks.isEmpty()) {
                         StringBuilder response = new StringBuilder("Отзывы:\n");
-                        for (String feedback : feedbacks) {
-                            response.append("- ").append(feedback).append("\n");
+                        for (Comments feedback : feedbacks) {
+                            response.append("- ").append(feedback.getMessage()).append("\n");
                         }
                         sendMessages(chatID, response.toString());
                     } else {
@@ -75,7 +78,7 @@ public class TelegramBot extends TelegramLongPollingBot {
                 }
                 default -> {
                     if ((feedbackMap.containsKey(chatID))) { // для feedback
-                        handleUserInput(chatID, messageText);
+                        handleUserInput(user, chatID, messageText);
                     } else {
                         sendMessages(chatID, "Команда не поддерживается");
                     }
@@ -84,13 +87,13 @@ public class TelegramBot extends TelegramLongPollingBot {
         }
     }
 
-    private void handleUserInput(long chatID, String messageText) {
+    private void handleUserInput(User user, long chatID, String messageText) {
         String feedbackState = feedbackMap.get(chatID);
 
         if (feedbackState != null && feedbackState.equals("awaiting_feedback")) {
             // Обрабатываем полученный отзыв
             if (messageText.length() > 2) {
-                insertFeedback(chatID, messageText);
+                commentsRepository.save(new Comments(user, messageText));
                 sendMessages(chatID, "Отзыв добавлен");
             } else {
                 sendMessages(chatID, "Отзыв слишком короткий");
@@ -102,47 +105,11 @@ public class TelegramBot extends TelegramLongPollingBot {
         }
     }
 
-    private void insertFeedback(long chatID, String feedback) {
-        log.info("Получен запрос на создание отзыва от пользователя({})", chatID);
-        String sqlQuery = "INSERT INTO feedback (user_id, comment) VALUES (?, ?)";
-        jdbcTemplate.update(sqlQuery, getUserByChatID(chatID).getId(), feedback);
-        log.info("Пользователь с идентификатором {} оставил отзыв", chatID);
-    }
-
-    private User getUserByChatID(long chatID) {
-        String sqlQuery = "SELECT id, chatID, name FROM users WHERE chatID = ?";
-        SqlRowSet userRows = jdbcTemplate.queryForRowSet(sqlQuery, chatID);
-        if (userRows.next()) {
-            return jdbcTemplate.queryForObject(sqlQuery, this::mapRowToUser, chatID);
-        } else {
-            log.info("User с идентификатором {} не найден.", chatID);
-            throw new UserNotFoundException("Пользователь не найден");
-        }
-    }
-
-    private void createUserIfNotExists(long UserID, String name) {
-        log.info("Получен запрос на получение пользователя({})", UserID);
-        String sqlQuery = "select chatID, name FROM users WHERE chatID = ?";
-        SqlRowSet userRows = jdbcTemplate.queryForRowSet(sqlQuery, UserID);
-        if (!userRows.next()) {
-            jdbcTemplate.update("insert into users (name, chatID)" + "values (?, ?)", name, UserID);
-            log.info("Пользователь {} с идентификатором {} добавлен в БД", name, UserID);
-        }
-    }
-
-    private User mapRowToUser(ResultSet rs, int rowNum) throws SQLException {
-        return new User(
-                rs.getLong("id"),
-                rs.getLong("chatID"),
-                rs.getString("name")
-        );
-    }
-
 
     public void sendMsg (Message message, long chatID, String name) {
         SendMessage sendMessage = new SendMessage();
         sendMessage.enableMarkdown(true);
-
+        userRepository.save(new User(chatID, name));
         ReplyKeyboardMarkup replyKeyboardMarkup = new
                 ReplyKeyboardMarkup();
         sendMessage.setReplyMarkup(replyKeyboardMarkup);
@@ -171,7 +138,7 @@ public class TelegramBot extends TelegramLongPollingBot {
         sendMessage.setChatId(message.getChatId().toString());
         sendMessage.setReplyToMessageId(message.getMessageId());
         sendMessage.setText("Приветствую, " + name + " !");
-        createUserIfNotExists(chatID, name);
+      //  createUserIfNotExists(chatID, name);
         try {
             execute(sendMessage);
         } catch (TelegramApiException e) {
@@ -197,13 +164,6 @@ public class TelegramBot extends TelegramLongPollingBot {
                         Молочный шоколад 200 мл - 100 руб
                         Американо 200 мл - 100 руб
                         """;
-    }
-
-    private List<String> getFeedbacks() {
-        String sqlQuery = "SELECT users.name, feedback.comment FROM feedback " +
-                "LEFT JOIN users ON users.id = feedback.user_id";
-        return jdbcTemplate.query(sqlQuery, (resultSet, rowNum) ->
-                resultSet.getString("name") + ": " + resultSet.getString("comment"));
     }
 
     private void sendMessages(long chatID, String sendText) {
