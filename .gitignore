@@ -1,8 +1,41 @@
+# Compiled class file
+*.class
+
+# Log file
+*.log
+
+# Package Files
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
 HELP.md
 target/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
+
+### Maven ###
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+
+### Gradle ###
+.gradle
+build/
+!gradle-wrapper.jar
+!.gradle/gradle.properties
+!**/src/main/**/build/
+!**/src/test/**/build/
 
 ### STS ###
 .apt_generated
@@ -18,6 +51,10 @@ target/
 *.iws
 *.iml
 *.ipr
+*.idea/**/workspace.xml
+*.idea/**/tasks.xml
+*.idea/**/dataSources/
+*.idea/**/shelf/
 
 ### NetBeans ###
 /nbproject/private/
@@ -25,9 +62,26 @@ target/
 /dist/
 /nbdist/
 /.nb-gradle/
-build/
-!**/src/main/**/build/
-!**/src/test/**/build/
 
 ### VS Code ###
 .vscode/
+
+### Environment variables ###
+.env
+*.env
+!.env.example
+
+### Database ###
+*.db
+*.sqlite
+*.sqlite3
+
+### Temporary files ###
+*.tmp
+*.temp
+*.bak
+*.cache
+
+### OS ###
+.DS_Store
+Thumbs.db

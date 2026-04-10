@@ -1,42 +1,37 @@
 package com.example.SpringBot.service;
 
 import com.example.SpringBot.config.BotConfig;
-
 import com.example.SpringBot.model.Comments;
 import com.example.SpringBot.model.User;
-import com.example.SpringBot.repository.CommentsRepository;
-import com.example.SpringBot.repository.UserRepository;
 import lombok.extern.slf4j.Slf4j;
-
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
-import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Component
 public class TelegramBot extends TelegramLongPollingBot {
 
-    final BotConfig config;
-    @Autowired
-    private UserRepository userRepository;
-    @Autowired
-    private CommentsRepository commentsRepository;
+    private final BotConfig config;
+    private final UserService userService;
+    private final CommentsService commentsService;
 
-    private final Map<Long, String> feedbackMap = new HashMap<>();
+    // Хранение состояния пользователей (для сбора отзывов)
+    private final Map<Long, UserState> userStates = new ConcurrentHashMap<>();
 
-    public TelegramBot(BotConfig config) {
+    public TelegramBot(BotConfig config, UserService userService, CommentsService commentsService) {
         this.config = config;
+        this.userService = userService;
+        this.commentsService = commentsService;
     }
 
     @Override
@@ -51,130 +46,163 @@ public class TelegramBot extends TelegramLongPollingBot {
 
     @Override
     public void onUpdateReceived(Update update) {
-        Message message = update.getMessage();
-        if (update.hasMessage() && update.getMessage().hasText()) {
+        if (!update.hasMessage() || !update.getMessage().hasText()) {
+            return;
+        }
+
+        try {
             String messageText = update.getMessage().getText();
-            long chatID = update.getMessage().getChatId();
-            User user = new User(chatID, update.getMessage().getChat().getFirstName());
+            long chatId = update.getMessage().getChatId();
+            String firstName = update.getMessage().getChat().getFirstName();
 
-            switch (messageText) {
-                case "/start" -> sendMsg(message, chatID, user.getName());
-                case "Напитки \u2615" -> sendMessages(chatID, drinksCoffee());
-                case "Добавить отзыв \uD83D\uDE0A" -> {
-                    sendMessages(chatID, "Напишите отзыв.");
-                    feedbackMap.put(chatID, "awaiting_feedback");
-                }
-                case "Посмотреть отзывы" -> {
-                    List<Comments> feedbacks = commentsRepository.findAll();
-                    if (!feedbacks.isEmpty()) {
-                        StringBuilder response = new StringBuilder("Отзывы:\n");
-                        for (Comments feedback : feedbacks) {
-                            response.append("- ").append(feedback.getMessage()).append("\n");
-                        }
-                        sendMessages(chatID, response.toString());
-                    } else {
-                        sendMessages(chatID, "Нет доступных отзывов.");
-                    }
-                }
-                default -> {
-                    if ((feedbackMap.containsKey(chatID))) { // для feedback
-                        handleUserInput(user, chatID, messageText);
-                    } else {
-                        sendMessages(chatID, "Команда не поддерживается");
-                    }
-                }
-            }
-        }
-    }
+            // Регистрируем или обновляем пользователя
+            User user = userService.createOrUpdateUser(chatId, firstName);
 
-    private void handleUserInput(User user, long chatID, String messageText) {
-        String feedbackState = feedbackMap.get(chatID);
-
-        if (feedbackState != null && feedbackState.equals("awaiting_feedback")) {
-            // Обрабатываем полученный отзыв
-            if (messageText.length() > 2) {
-                commentsRepository.save(new Comments(user, messageText));
-                sendMessages(chatID, "Отзыв добавлен");
+            // Обрабатываем команды
+            if (userStates.containsKey(chatId)) {
+                handleStateMessage(chatId, user, messageText);
             } else {
-                sendMessages(chatID, "Отзыв слишком короткий");
+                handleCommand(chatId, user, messageText);
             }
-            // Удаляем состояние ожидания отзыва
-            feedbackMap.remove(chatID);
-        } else {
-            sendMessages(chatID, "Команда не поддерживается");
+        } catch (Exception e) {
+            log.error("Ошибка при обработке сообщения от пользователя", e);
+            sendTextMessage(update.getMessage().getChatId(), 
+                    "Произошла ошибка. Пожалуйста, попробуйте еще раз.");
         }
     }
 
+    private void handleCommand(long chatId, User user, String command) {
+        switch (command) {
+            case "/start" -> sendStartMessage(chatId, user.getName());
+            case "Напитки ☕" -> sendTextMessage(chatId, getDrinksMenu());
+            case "Добавить отзыв 😊" -> startFeedbackFlow(chatId);
+            case "Посмотреть отзывы" -> showComments(chatId);
+            default -> sendTextMessage(chatId, "Неизвестная команда. Используйте меню ниже.");
+        }
+    }
 
-    public void sendMsg (Message message, long chatID, String name) {
-        SendMessage sendMessage = new SendMessage();
-        sendMessage.enableMarkdown(true);
-        userRepository.save(new User(chatID, name));
-        ReplyKeyboardMarkup replyKeyboardMarkup = new
-                ReplyKeyboardMarkup();
-        sendMessage.setReplyMarkup(replyKeyboardMarkup);
-        replyKeyboardMarkup.setSelective(true);
-        replyKeyboardMarkup.setResizeKeyboard(true);
-        replyKeyboardMarkup.setOneTimeKeyboard(false);
+    private void handleStateMessage(long chatId, User user, String messageText) {
+        UserState state = userStates.get(chatId);
+        
+        if (state == UserState.AWAITING_FEEDBACK) {
+            processFeedback(chatId, user, messageText);
+        } else {
+            log.warn("Неизвестное состояние пользователя {}: {}", chatId, state);
+            userStates.remove(chatId);
+            sendTextMessage(chatId, "Произошла ошибка. Пожалуйста, начните сначала.");
+        }
+    }
 
-        // список строк клавиатуры
+    private void startFeedbackFlow(long chatId) {
+        userStates.put(chatId, UserState.AWAITING_FEEDBACK);
+        sendTextMessage(chatId, "Напишите ваш отзыв о нашей кофейне:");
+    }
+
+    private void processFeedback(long chatId, User user, String messageText) {
+        try {
+            commentsService.addComment(user, messageText);
+            sendTextMessage(chatId, "Спасибо за ваш отзыв! 😊");
+            log.info("Пользователь {} (chatId: {}) добавил отзыв", user.getName(), chatId);
+        } catch (IllegalArgumentException e) {
+            sendTextMessage(chatId, e.getMessage());
+            return;
+        } finally {
+            userStates.remove(chatId);
+        }
+    }
+
+    private void sendStartMessage(long chatId, String userName) {
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText(String.format("Привет, %s! ☕\nДобро пожаловать в бот кофейни самообслуживания!", userName));
+        message.setReplyMarkup(createKeyboard());
+
+        executeMessage(message);
+    }
+
+    private ReplyKeyboardMarkup createKeyboard() {
+        ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup();
+        keyboardMarkup.setSelective(true);
+        keyboardMarkup.setResizeKeyboard(true);
+        keyboardMarkup.setOneTimeKeyboard(false);
+
         List<KeyboardRow> keyboard = new ArrayList<>();
 
-        // Первая строчка клавиатуры
-        KeyboardRow keyboardFirstRow = new KeyboardRow();
-        keyboardFirstRow.add("Напитки \u2615");
-        keyboardFirstRow.add("Добавить отзыв \uD83D\uDE0A");
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add("Напитки ☕");
+        row1.add("Добавить отзыв 😊");
 
-        // Вторая строчка клавиатуры
-        KeyboardRow keyboardSecondRow = new KeyboardRow();
-        keyboardSecondRow.add("Посмотреть отзывы");
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("Посмотреть отзывы");
 
+        keyboard.add(row1);
+        keyboard.add(row2);
 
-        keyboard.add(keyboardFirstRow);
-        keyboard.add(keyboardSecondRow);
+        keyboardMarkup.setKeyboard(keyboard);
+        return keyboardMarkup;
+    }
 
-        replyKeyboardMarkup.setKeyboard(keyboard);
-
-        sendMessage.setChatId(message.getChatId().toString());
-        sendMessage.setReplyToMessageId(message.getMessageId());
-        sendMessage.setText("Приветствую, " + name + " !");
-      //  createUserIfNotExists(chatID, name);
-        try {
-            execute(sendMessage);
-        } catch (TelegramApiException e) {
-            e.printStackTrace();
+    private void showComments(long chatId) {
+        List<Comments> comments = commentsService.getAllComments();
+        
+        if (comments.isEmpty()) {
+            sendTextMessage(chatId, "Отзывов пока нет. Будьте первым! 😊");
+            return;
         }
+
+        StringBuilder response = new StringBuilder("📝 *Отзывы наших гостей:*\n\n");
+        for (int i = 0; i < Math.min(comments.size(), 10); i++) {
+            Comments comment = comments.get(i);
+            response.append("• ").append(comment.getMessage()).append("\n\n");
+        }
+        
+        if (comments.size() > 10) {
+            response.append("\n_... и еще ").append(comments.size() - 10).append(" отзывов_");
+        }
+
+        sendTextMessage(chatId, response.toString());
     }
 
-    private String drinksCoffee() {
-        return
-                """
-                        Доступные напитки:\s
-                        Большие
-                        Капучино 350мл - 130 руб\s
-                        Латте 350мл - 130 руб
-                        Моккачино 350мл - 130 руб
-
-                        Маленькие
-                        Раф Банановый 200 мл - 100 руб
-                        Моккачино 200 мл - 100 руб
-                        Латте 200 мл - 100 руб
-                        Капучино 200 мл - 100 руб
-                        Горячий шоколад 200 мл - 100 руб
-                        Молочный шоколад 200 мл - 100 руб
-                        Американо 200 мл - 100 руб
-                        """;
+    private String getDrinksMenu() {
+        return """
+            ☕ *Меню напитков:*
+            
+            *Большие (350 мл) - 130 руб*
+            • Капучино
+            • Латте
+            • Моккачино
+            
+            *Маленькие (200 мл) - 100 руб*
+            • Раф Банановый
+            • Моккачино
+            • Латте
+            • Капучино
+            • Горячий шоколад
+            • Молочный шоколад
+            • Американо
+            """;
     }
 
-    private void sendMessages(long chatID, String sendText) {
+    private void sendTextMessage(long chatId, String text) {
         SendMessage message = new SendMessage();
-        message.setChatId(String.valueOf(chatID));
-        message.setText(sendText);
+        message.setChatId(String.valueOf(chatId));
+        message.setText(text);
+        message.enableMarkdown(true);
+        executeMessage(message);
+    }
 
+    private void executeMessage(SendMessage message) {
         try {
             execute(message);
         } catch (TelegramApiException e) {
-            throw new RuntimeException(e);
+            log.error("Ошибка при отправке сообщения: {}", e.getMessage(), e);
         }
+    }
+
+    /**
+     * Состояния пользователя для многошаговых диалогов
+     */
+    public enum UserState {
+        AWAITING_FEEDBACK
     }
 }
